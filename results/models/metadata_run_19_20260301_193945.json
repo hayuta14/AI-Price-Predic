@@ -1,0 +1,40 @@
+{
+  "run_id": 19,
+  "timestamp": "20260301_193945",
+  "features": [
+    "rsi_7_trend_context",
+    "trend_regime"
+  ],
+  "metrics": {
+    "sharpe_ratio": 0.5004254112431863,
+    "max_drawdown": 0.20754606063193928,
+    "profit_factor": 1.3101588385253218,
+    "calmar_ratio": 0.5654509864986013,
+    "total_return": 0.11389477527127623,
+    "annualized_return": 0.11735712472822857,
+    "volatility": 0.31989436266405324,
+    "win_rate": 0.3,
+    "total_trades": 20.0,
+    "winning_trades": 6.0,
+    "losing_trades": 14.0,
+    "max_dd_duration": 78.0,
+    "recovery_factor": 0.5487686681428101
+  },
+  "label_config": {
+    "horizon": 12,
+    "threshold": 0.004
+  },
+  "hyperparams": {
+    "max_depth": 5,
+    "learning_rate": 0.08292925753560497,
+    "n_estimators": 356,
+    "subsample": 0.6861250624115541,
+    "colsample_bytree": 0.6839307684789167
+  },
+  "risk_config": {
+    "risk_per_trade": 0.024999999999999998,
+    "atr_multiplier": 3.0,
+    "reward_risk_ratio": 2.5
+  },
+  "model_path": "results\\models\\model_run_19_20260301_193945.pkl"
+}

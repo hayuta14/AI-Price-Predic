@@ -1,0 +1,39 @@
+{
+  "run_id": 18,
+  "timestamp": "20260301_185545",
+  "features": [
+    "rsi_14_overbought"
+  ],
+  "metrics": {
+    "sharpe_ratio": 0.0,
+    "max_drawdown": 0.0,
+    "profit_factor": 0.0,
+    "calmar_ratio": 0.0,
+    "total_return": 0.0,
+    "annualized_return": 0.0,
+    "volatility": 0.0,
+    "win_rate": 0.0,
+    "total_trades": 0.0,
+    "winning_trades": 0.0,
+    "losing_trades": 0.0,
+    "max_dd_duration": 0.0,
+    "recovery_factor": 0.0
+  },
+  "label_config": {
+    "horizon": 12,
+    "threshold": 0.004
+  },
+  "hyperparams": {
+    "max_depth": 3,
+    "learning_rate": 0.019947241249581454,
+    "n_estimators": 406,
+    "subsample": 0.7285919903222579,
+    "colsample_bytree": 0.8342449045044094
+  },
+  "risk_config": {
+    "risk_per_trade": 0.01,
+    "atr_multiplier": 1.5,
+    "reward_risk_ratio": 1.5
+  },
+  "model_path": "results\\models\\model_run_18_20260301_185545.pkl"
+}
