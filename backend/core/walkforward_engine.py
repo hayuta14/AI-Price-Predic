@@ -308,9 +308,8 @@ class WalkForwardEngine:
             folds.append(fold)
             fold_id += 1
             
-            # 移动到下一个fold
-            # Bắt đầu fold kế tiếp ngay sau test_end để không bỏ trống dữ liệu
-            train_end = train_end + step
+            # Move to the next fold without leaving a gap in the data
+            train_end = test_end
             
             # 检查是否还有足够的数据
             if train_end > data[date_column].max():

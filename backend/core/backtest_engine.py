@@ -484,7 +484,7 @@ class BacktestEngine:
             open_price = row.get('open', price)
             high_price = row.get('high', price)
             low_price = row.get('low', price)
-            prediction = predictions.iloc[idx] if idx < len(predictions) else 0.5
+            prediction = predictions.loc[idx] if idx in predictions.index else 0.5
             
             # 获取ATR值
             atr = atr_values.iloc[idx] if atr_values is not None and idx < len(atr_values) else price * 0.01
@@ -583,6 +583,50 @@ class BacktestEngine:
             daily_returns=self._calculate_daily_returns(equity_series)
         )
 
+    def _generate_trade_log(self) -> pd.DataFrame:
+        """生成交易日志DataFrame"""
+        if not self.trades:
+            return pd.DataFrame()
+
+        log_data = []
+        for trade in self.trades:
+            log_data.append({
+                'trade_id': trade.trade_id,
+                'entry_time': trade.entry_time,
+                'exit_time': trade.exit_time,
+                'direction': trade.direction.name,
+                'entry_price': trade.entry_price,
+                'exit_price': trade.exit_price,
+                'position_size': trade.position_size,
+                'pnl': trade.pnl,
+                'pnl_pct': trade.pnl_pct,
+                'fees': trade.fees,
+                'slippage': trade.slippage,
+                'funding_cost': trade.funding_cost,
+                'exit_reason': trade.exit_reason,
+                # 退出所在K线的OHLC信息
+                'bar_open': trade.exit_bar_open,
+                'bar_high': trade.exit_bar_high,
+                'bar_low': trade.exit_bar_low,
+                'bar_close': trade.exit_bar_close,
+                # 是否因跳空而在开盘价离场
+                'gap_exit': trade.gap_exit,
+            })
+
+        return pd.DataFrame(log_data)
+
+    def _calculate_daily_returns(self, equity_curve: pd.Series) -> pd.Series:
+        """Calculate daily returns."""
+        if len(equity_curve) == 0:
+            return pd.Series()
+
+        # Group by date
+        equity_curve.index = pd.to_datetime(equity_curve.index)
+        daily_equity = equity_curve.resample('D').last()
+        daily_returns = daily_equity.pct_change().fillna(0.0)
+
+        return daily_returns
+
 
 class RealisticExecutionSimulator:
     """
@@ -674,46 +718,3 @@ class RealisticExecutionSimulator:
         fill_ratio = min(1.0, max(available_liquidity, 0.0) / (order_size * 1.5))
         return float(order_size * fill_ratio)
     
-    def _generate_trade_log(self) -> pd.DataFrame:
-        """生成交易日志DataFrame"""
-        if not self.trades:
-            return pd.DataFrame()
-        
-        log_data = []
-        for trade in self.trades:
-            log_data.append({
-                'trade_id': trade.trade_id,
-                'entry_time': trade.entry_time,
-                'exit_time': trade.exit_time,
-                'direction': trade.direction.name,
-                'entry_price': trade.entry_price,
-                'exit_price': trade.exit_price,
-                'position_size': trade.position_size,
-                'pnl': trade.pnl,
-                'pnl_pct': trade.pnl_pct,
-                'fees': trade.fees,
-                'slippage': trade.slippage,
-                'funding_cost': trade.funding_cost,
-                'exit_reason': trade.exit_reason,
-                # 退出所在K线的OHLC信息
-                'bar_open': trade.exit_bar_open,
-                'bar_high': trade.exit_bar_high,
-                'bar_low': trade.exit_bar_low,
-                'bar_close': trade.exit_bar_close,
-                # 是否因跳空而在开盘价离场
-                'gap_exit': trade.gap_exit,
-            })
-        
-        return pd.DataFrame(log_data)
-    
-    def _calculate_daily_returns(self, equity_curve: pd.Series) -> pd.Series:
-        """计算日收益率"""
-        if len(equity_curve) == 0:
-            return pd.Series()
-        
-        # 按日期分组
-        equity_curve.index = pd.to_datetime(equity_curve.index)
-        daily_equity = equity_curve.resample('D').last()
-        daily_returns = daily_equity.pct_change().fillna(0.0)
-        
-        return daily_returns
