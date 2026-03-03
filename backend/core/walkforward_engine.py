@@ -180,7 +180,8 @@ class WalkForwardEngine:
             fold_id += 1
             
             # 移动到下一个fold
-            train_end = test_end + step
+            # Bắt đầu fold kế tiếp ngay sau test_end để không bỏ trống dữ liệu
+            train_end = train_end + step
             
             # 检查是否还有足够的数据
             if train_end > data[date_column].max():

@@ -79,11 +79,20 @@ class AdaptivePositionSizing:
         if confidence < self.confidence_threshold:
             return 0.0  # Không trade nếu confidence quá thấp
         
-        # Risk = base_risk * confidence_multiplier
-        # confidence_multiplier = confidence (linear scaling)
-        # Hoặc có thể dùng: confidence_multiplier = confidence^2 (quadratic)
-        risk = self.base_risk * confidence
-        
+        # Tiered risk sizing thay vì linear để tránh risk quá nhỏ khi confidence trung bình
+        # confidence: [0, 1]
+        # - low:    [threshold, 0.35) -> 0.6x base_risk
+        # - medium: [0.35, 0.70)      -> 1.0x base_risk
+        # - high:   [0.70, 1.00]      -> 1.4x base_risk
+        if confidence >= 0.70:
+            risk_multiplier = 1.4
+        elif confidence >= 0.35:
+            risk_multiplier = 1.0
+        else:
+            risk_multiplier = 0.6
+
+        risk = self.base_risk * risk_multiplier
+
         # Giới hạn trong [min_risk, max_risk]
         risk = max(self.min_risk, min(self.max_risk, risk))
         

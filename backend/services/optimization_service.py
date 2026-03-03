@@ -693,8 +693,17 @@ class OptimizationService:
             filtered_count = (valid_signals != 0).sum()
             print(f"✅ Đã filter signals: {filtered_count} signals sau filter")
         
-        signals = pd.Series(0, index=data.index, dtype=int)
-        signals.loc[valid_signals.index] = valid_signals.values
+        # Chỉ chạy final backtest trên TEST SET để tránh optimization bias
+        n_total = len(valid_data)
+        n_validation = int(n_total * 0.7)
+        test_data = valid_data.iloc[n_validation:].copy()
+
+        # Fallback nếu test quá nhỏ
+        if len(test_data) == 0:
+            test_data = valid_data.copy()
+
+        test_predictions = predictions.reindex(test_data.index, fill_value=0.5)
+        test_signals = valid_signals.reindex(test_data.index, fill_value=0)
 
         # Chạy kiểm tra ngược
         from backend.core.backtest_engine import BacktestEngine
@@ -710,15 +719,15 @@ class OptimizationService:
         backtest_engine = BacktestEngine(risk_engine, trading_cfg, initial_equity)
         
         # Tính toán ATR
-        if 'high' in data.columns and 'low' in data.columns:
-            atr_values = (data['high'] - data['low']).rolling(window=14).mean()
+        if 'high' in test_data.columns and 'low' in test_data.columns:
+            atr_values = (test_data['high'] - test_data['low']).rolling(window=14).mean()
         else:
-            atr_values = data[price_col] * 0.01
+            atr_values = test_data[price_col] * 0.01
         
         backtest_results = backtest_engine.run_backtest(
-            data=data,
-            predictions=predictions.reindex(data.index, fill_value=0.5),
-            signals=signals,
+            data=test_data,
+            predictions=test_predictions,
+            signals=test_signals,
             atr_values=atr_values,
             atr_multiplier=risk_config.atr_multiplier,
             reward_risk_ratio=risk_config.reward_risk_ratio,

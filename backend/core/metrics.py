@@ -312,7 +312,7 @@ class MetricsCalculator:
             'losing_trades': n_losses,
             'win_rate': win_rate,
             'avg_win': avg_win,
-            'avg_loss': avg_win,
+            'avg_loss': avg_loss,
             'largest_win': largest_win,
             'largest_loss': largest_loss
         }

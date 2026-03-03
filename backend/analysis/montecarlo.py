@@ -57,19 +57,15 @@ class MonteCarloSimulator:
         Returns:
             随机排序后的交易日志
         """
-        # 保持时间顺序，但随机化执行顺序（在时间窗口内）
+        # Randomize toàn bộ sequence để phản ánh path dependency thực tế tốt hơn
         trades = trades.copy()
-        
-        # 按日期分组，在每天内随机排序
+
         if 'entry_time' in trades.columns:
-            trades['date'] = pd.to_datetime(trades['entry_time']).dt.date
-            trades = trades.groupby('date', group_keys=False).apply(
-                lambda x: x.sample(frac=1, random_state=None)
-            ).reset_index(drop=True)
-            trades = trades.drop('date', axis=1)
-        else:
-            # 如果没有时间列，完全随机排序
-            trades = trades.sample(frac=1, random_state=None).reset_index(drop=True)
+            trades['entry_time'] = pd.to_datetime(trades['entry_time'])
+            trades = trades.sort_values('entry_time').reset_index(drop=True)
+
+        # Shuffle toàn bộ trade order (không chỉ trong ngày)
+        trades = trades.sample(frac=1, random_state=None).reset_index(drop=True)
         
         return trades
     

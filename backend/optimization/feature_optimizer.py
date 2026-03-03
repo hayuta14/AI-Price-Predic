@@ -204,7 +204,8 @@ class FeatureOptimizer:
         model_predict_fn: Callable,
         max_iterations: int = 20,
         min_sharpe_improvement: float = 0.01,
-        apply_mi_filter: bool = True
+        apply_mi_filter: bool = True,
+        max_features_to_try_per_iteration: int = 10
     ) -> FeatureSet:
         """
         优化特征集
@@ -261,12 +262,14 @@ class FeatureOptimizer:
         for iteration in range(max_iterations):
             improved = False
             
-            # 前向选择：尝试添加特征
+            # 前向选择：尝试添加特征（限制每轮评估数量，降低复杂度）
             if remaining_features:
                 best_new_feature = None
                 best_new_sharpe = best_sharpe
-                
-                for feature in list(remaining_features):
+
+                candidate_add_features = sorted(list(remaining_features))[:max_features_to_try_per_iteration]
+
+                for feature in candidate_add_features:
                     test_features = list(current_features | {feature})
                     
                     try:
@@ -299,7 +302,9 @@ class FeatureOptimizer:
                 worst_feature = None
                 best_removed_sharpe = best_sharpe
                 
-                for feature in list(current_features):
+                candidate_remove_features = sorted(list(current_features))[:max_features_to_try_per_iteration]
+
+                for feature in candidate_remove_features:
                     test_features = list(current_features - {feature})
                     
                     try:

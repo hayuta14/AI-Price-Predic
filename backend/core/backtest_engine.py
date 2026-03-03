@@ -99,7 +99,9 @@ class BacktestEngine:
         self.equity_history: List[float] = [initial_equity]
         self.time_history: List[datetime] = []
         
-        self.metrics_calculator = MetricsCalculator()
+        # Backtest này tính returns theo từng bar trong equity_series
+        self.metrics_calculator = MetricsCalculator(periods_per_year=365 * 24 * 4)
+        self.daily_metrics_calculator = MetricsCalculator(periods_per_year=365)
         self.trade_counter = 0
     
     def reset(self, initial_equity: Optional[float] = None):
@@ -469,8 +471,12 @@ class BacktestEngine:
         equity_series = pd.Series(self.equity_history[1:], index=self.time_history)
         returns = equity_series.pct_change().fillna(0.0)
         
-        # 计算指标
-        metrics = self.metrics_calculator.calculate_all_metrics(returns, equity_series)
+        # 计算日收益率（用于风险指标，避免与年化周期不一致）
+        daily_returns = self._calculate_daily_returns(equity_series)
+        daily_equity = (1 + daily_returns).cumprod() * self.initial_equity
+
+        # 使用daily metrics calculator，periods_per_year=365
+        metrics = self.daily_metrics_calculator.calculate_all_metrics(daily_returns, daily_equity)
         
         # 转换为字典
         metrics_dict = {

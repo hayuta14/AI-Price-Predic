@@ -10,7 +10,7 @@ import pandas as pd
 import numpy as np
 from typing import List, Dict, Optional, Any, Callable
 from dataclasses import dataclass
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+from concurrent.futures import as_completed
 import multiprocessing as mp
 from pathlib import Path
 import logging
@@ -238,14 +238,12 @@ class MultiModelTrainer:
         
         trained_candidates = []
         
-        # Sử dụng ThreadPoolExecutor vì GIL và XGBoost có thể release GIL
-        # ProcessPoolExecutor sẽ tốt hơn nếu có nhiều CPU cores
-        with ThreadPoolExecutor(max_workers=self.n_workers) as executor:
-            futures = {}
-            
-            for i, candidate in enumerate(candidates):
-                future = executor.submit(
-                    self.train_single_model,
+        # Với workload CPU-bound (XGBoost đã multithread nội bộ),
+        # chạy tuần tự ở mức candidate để tránh oversubscription CPU và contention.
+        for i, candidate in enumerate(candidates):
+            candidate_id = i
+            try:
+                candidate = self.train_single_model(
                     candidate_id=i,
                     data=data,
                     features=candidate['features'],
@@ -254,88 +252,81 @@ class MultiModelTrainer:
                     price_col=price_col,
                     timestamp_col=timestamp_col
                 )
-                futures[future] = i
-            
-            # Thu thập kết quả
-            for future in as_completed(futures):
-                candidate_id = futures[future]
-                try:
-                    candidate = future.result()
-                    trained_candidates.append(candidate)
-                    
-                    # Save model nếu cần
-                    if save_models and candidate.metrics.get('sharpe_ratio', -999) > -100:
-                        try:
-                            # Train lại model cuối cùng để save
-                            from backend.optimization.label_optimizer import LabelOptimizer
-                            label_optimizer = LabelOptimizer(self.walkforward_engine, None)
-                            
-                            use_dynamic = candidate.label_config.threshold < 0
-                            from backend.config import config
-                            default_atr_mult = config.label.default_atr_multiplier if hasattr(config.label, 'default_atr_multiplier') else 0.5
-                            atr_multiplier = abs(candidate.label_config.threshold) if use_dynamic else default_atr_mult
-                            threshold = candidate.label_config.threshold if not use_dynamic else 0.0
-                            
-                            atr_values = None
-                            if use_dynamic and all(col in data.columns for col in ['high', 'low', 'close']):
-                                from backend.data.feature_engineering import calculate_atr
-                                atr_values = calculate_atr(data, 14)
-                            
-                            labels = label_optimizer.create_labels(
-                                data=data,
-                                price_col=price_col,
-                                horizon=candidate.label_config.horizon,
-                                threshold=threshold,
-                                use_dynamic_threshold=use_dynamic,
-                                atr_values=atr_values,
-                                atr_multiplier=atr_multiplier
-                            )
-                            
-                            valid_data = data.iloc[:-candidate.label_config.horizon].copy() if candidate.label_config.horizon > 0 else data.copy()
-                            valid_labels = labels.iloc[:-candidate.label_config.horizon] if candidate.label_config.horizon > 0 else labels
-                            valid_data['label'] = valid_labels
-                            
-                            final_model = self.training_service.train_xgboost_model(
-                                valid_data[candidate.features],
-                                valid_data['label'],
-                                hyperparams={
-                                    'max_depth': candidate.hyperparams.max_depth,
-                                    'learning_rate': candidate.hyperparams.learning_rate,
-                                    'n_estimators': candidate.hyperparams.n_estimators,
-                                    'subsample': candidate.hyperparams.subsample,
-                                    'colsample_bytree': candidate.hyperparams.colsample_bytree
-                                },
-                                handle_imbalance=True  # Xử lý class imbalance
-                            )
-                            
-                            model_path = self.model_persistence.save_model(
-                                model=final_model,
-                                run_id=candidate.candidate_id,
-                                features=candidate.features,
-                                metrics=candidate.metrics,
-                                label_config={
-                                    'horizon': candidate.label_config.horizon,
-                                    'threshold': candidate.label_config.threshold
-                                },
-                                hyperparams={
-                                    'max_depth': candidate.hyperparams.max_depth,
-                                    'learning_rate': candidate.hyperparams.learning_rate,
-                                    'n_estimators': candidate.hyperparams.n_estimators,
-                                    'subsample': candidate.hyperparams.subsample,
-                                    'colsample_bytree': candidate.hyperparams.colsample_bytree
-                                }
-                            )
-                            candidate.model_path = model_path
-                            self.logger.info(f"Saved model for candidate {candidate.candidate_id}: {model_path}")
-                        except Exception as e:
-                            self.logger.warning(f"Could not save model for candidate {candidate.candidate_id}: {e}")
-                    
-                    self.logger.info(
-                        f"Candidate {candidate_id} completed: "
-                        f"Sharpe={candidate.metrics.get('sharpe_ratio', 0.0):.4f}"
-                    )
-                except Exception as e:
-                    self.logger.error(f"Error getting result for candidate {candidate_id}: {e}")
+                trained_candidates.append(candidate)
+
+                # Save model nếu cần
+                if save_models and candidate.metrics.get('sharpe_ratio', -999) > -100:
+                    try:
+                        # Train lại model cuối cùng để save
+                        from backend.optimization.label_optimizer import LabelOptimizer
+                        label_optimizer = LabelOptimizer(self.walkforward_engine, None)
+
+                        use_dynamic = candidate.label_config.threshold < 0
+                        from backend.config import config
+                        default_atr_mult = config.label.default_atr_multiplier if hasattr(config.label, 'default_atr_multiplier') else 0.5
+                        atr_multiplier = abs(candidate.label_config.threshold) if use_dynamic else default_atr_mult
+                        threshold = candidate.label_config.threshold if not use_dynamic else 0.0
+
+                        atr_values = None
+                        if use_dynamic and all(col in data.columns for col in ['high', 'low', 'close']):
+                            from backend.data.feature_engineering import calculate_atr
+                            atr_values = calculate_atr(data, 14)
+
+                        labels = label_optimizer.create_labels(
+                            data=data,
+                            price_col=price_col,
+                            horizon=candidate.label_config.horizon,
+                            threshold=threshold,
+                            use_dynamic_threshold=use_dynamic,
+                            atr_values=atr_values,
+                            atr_multiplier=atr_multiplier
+                        )
+
+                        valid_data = data.iloc[:-candidate.label_config.horizon].copy() if candidate.label_config.horizon > 0 else data.copy()
+                        valid_labels = labels.iloc[:-candidate.label_config.horizon] if candidate.label_config.horizon > 0 else labels
+                        valid_data['label'] = valid_labels
+
+                        final_model = self.training_service.train_xgboost_model(
+                            valid_data[candidate.features],
+                            valid_data['label'],
+                            hyperparams={
+                                'max_depth': candidate.hyperparams.max_depth,
+                                'learning_rate': candidate.hyperparams.learning_rate,
+                                'n_estimators': candidate.hyperparams.n_estimators,
+                                'subsample': candidate.hyperparams.subsample,
+                                'colsample_bytree': candidate.hyperparams.colsample_bytree
+                            },
+                            handle_imbalance=True  # Xử lý class imbalance
+                        )
+
+                        model_path = self.model_persistence.save_model(
+                            model=final_model,
+                            run_id=candidate.candidate_id,
+                            features=candidate.features,
+                            metrics=candidate.metrics,
+                            label_config={
+                                'horizon': candidate.label_config.horizon,
+                                'threshold': candidate.label_config.threshold
+                            },
+                            hyperparams={
+                                'max_depth': candidate.hyperparams.max_depth,
+                                'learning_rate': candidate.hyperparams.learning_rate,
+                                'n_estimators': candidate.hyperparams.n_estimators,
+                                'subsample': candidate.hyperparams.subsample,
+                                'colsample_bytree': candidate.hyperparams.colsample_bytree
+                            }
+                        )
+                        candidate.model_path = model_path
+                        self.logger.info(f"Saved model for candidate {candidate.candidate_id}: {model_path}")
+                    except Exception as e:
+                        self.logger.warning(f"Could not save model for candidate {candidate.candidate_id}: {e}")
+
+                self.logger.info(
+                    f"Candidate {candidate_id} completed: "
+                    f"Sharpe={candidate.metrics.get('sharpe_ratio', 0.0):.4f}"
+                )
+            except Exception as e:
+                self.logger.error(f"Error getting result for candidate {candidate_id}: {e}")
         
         # Sắp xếp theo Sharpe ratio
         trained_candidates.sort(

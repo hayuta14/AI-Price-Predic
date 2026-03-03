@@ -6,7 +6,7 @@
 - 使用walk-forward验证评估每个配置
 - 存储每个配置的性能指标
 """
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Optional
 from dataclasses import dataclass
 import pandas as pd
 import numpy as np
@@ -117,21 +117,20 @@ class LabelOptimizer:
             
             for i in range(len(data) - horizon):
                 current_price = prices[i]
-                future_prices = prices[i+1:i+horizon+1]
-                
-                # Tính max return và min return
-                max_return = (future_prices.max() - current_price) / current_price
-                min_return = (future_prices.min() - current_price) / current_price
-                
+                future_close = prices[i + horizon]
+
+                # Dùng future close tại t+horizon để tránh hindsight bias
+                future_return = (future_close - current_price) / current_price
+
                 # Lấy thresholds
                 current_long_threshold = dynamic_long_thresholds.iloc[i] if use_dynamic_threshold else long_threshold
                 current_short_threshold = dynamic_short_thresholds.iloc[i] if use_dynamic_threshold else short_threshold
-                
-                # Long label: max return >= long_threshold
-                if max_return >= current_long_threshold:
+
+                # Long label: return tại t+horizon >= long_threshold
+                if future_return >= current_long_threshold:
                     labels[i] = 1
-                # Short label: min_return <= -short_threshold (giá giảm)
-                elif abs(min_return) >= current_short_threshold and min_return < 0:
+                # Short label: return tại t+horizon <= -short_threshold
+                elif future_return <= -current_short_threshold:
                     labels[i] = -1
                 # Neutral: không đạt threshold nào
                 else:
@@ -143,16 +142,16 @@ class LabelOptimizer:
             # Symmetric labels: 1 = up, 0 = otherwise
             for i in range(len(data) - horizon):
                 current_price = prices[i]
-                future_prices = prices[i+1:i+horizon+1]
-                
-                # 计算未来最高收益
-                max_return = (future_prices.max() - current_price) / current_price
-                
+                future_close = prices[i + horizon]
+
+                # Dùng close tại t+horizon để tránh hindsight bias
+                future_return = (future_close - current_price) / current_price
+
                 # 获取阈值（固定或动态）
                 current_threshold = dynamic_thresholds.iloc[i] if use_dynamic_threshold else threshold
-                
-                # 如果最大收益超过阈值，标记为1
-                if max_return >= current_threshold:
+
+                # Nếu return tại t+horizon vượt ngưỡng thì gán label=1
+                if future_return >= current_threshold:
                     labels[i] = 1
             
             return pd.Series(labels, index=data.index)
