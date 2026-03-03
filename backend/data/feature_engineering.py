@@ -12,7 +12,24 @@ Tạo các đặc trưng kỹ thuật phong phú cho mô hình XGBoost:
 """
 import pandas as pd
 import numpy as np
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Sequence, Dict
+
+
+def zscore_rolling(series: pd.Series, window: int) -> pd.Series:
+    """
+    计算滚动Z-score，用于标准化如funding/open interest等序列.
+
+    Args:
+        series: 输入时间序列
+        window: 滚动窗口长度
+
+    Returns:
+        滚动Z-score序列
+    """
+    rolling_mean = series.rolling(window).mean()
+    rolling_std = series.rolling(window).std()
+    z = (series - rolling_mean) / rolling_std.replace(0, np.nan)
+    return z.fillna(0.0)
 
 
 def calculate_rsi(prices: pd.Series, period: int = 14) -> pd.Series:
@@ -82,6 +99,44 @@ def calculate_atr(data: pd.DataFrame, period: int = 14) -> pd.Series:
     tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
     atr = tr.rolling(window=period).mean()
     return atr.fillna(tr.mean() if len(tr) > 0 else 0.0)
+
+
+def create_targets(
+    df: pd.DataFrame,
+    forward_periods: int = 3,
+    threshold: float = 0.002,
+) -> pd.DataFrame:
+    """
+    创建基于收益率的多分类目标，而不是直接预测价格.
+
+    默认 threshold=0.2% 适用于 BTC 15m.
+    - log_return_fwd: 回归头用的log-return
+    - target_class: -1/0/1 多分类标签
+    - target_ev: 期望收益（目前直接等于log_return_fwd，可扩展为EV）
+    """
+    out = df.copy()
+
+    if "close" not in out.columns:
+        # 无价格信息时返回原始数据
+        return out
+
+    out["log_return_fwd"] = np.log(
+        out["close"].shift(-forward_periods) / out["close"]
+    )
+
+    def _classify_return(r: float) -> int:
+        if pd.isna(r):
+            return 0
+        if r > threshold:
+            return 1
+        if r < -threshold:
+            return -1
+        return 0
+
+    out["target_class"] = out["log_return_fwd"].apply(_classify_return)
+    out["target_ev"] = out["log_return_fwd"]
+
+    return out
 
 
 def calculate_volatility(returns: pd.Series, window: int = 20) -> pd.Series:
@@ -185,6 +240,159 @@ def calculate_market_regime(data: pd.DataFrame, lookback: int = 50) -> pd.DataFr
     )
     
     return result.fillna(0.0)
+
+
+# ============================================================
+# Futures-specific feature groups
+# ============================================================
+
+def add_futures_features(df: pd.DataFrame) -> Tuple[pd.DataFrame, List[str]]:
+    """
+    添加期货相关特征:
+    - funding rate 特征
+    - open interest 特征
+    - long/short ratio
+    - liquidation 特征
+
+    要求: 已经在上游把 funding_rate / open_interest 等字段 merge 进 df.
+    """
+    out = df.copy()
+    features: List[str] = []
+
+    # --- Funding Rate Features ---
+    if "funding_rate" in out.columns:
+        out["funding_rate_zscore"] = zscore_rolling(out["funding_rate"], 48)
+        out["funding_rate_cumsum_8h"] = out["funding_rate"].rolling(32).sum()
+        out["funding_extreme"] = (out["funding_rate"].abs() > 0.001).astype(int)
+        features.extend(
+            ["funding_rate_zscore", "funding_rate_cumsum_8h", "funding_extreme"]
+        )
+
+    # --- Open Interest Features ---
+    if "open_interest" in out.columns:
+        out["oi_change_pct"] = out["open_interest"].pct_change(4)
+        out["oi_zscore"] = zscore_rolling(out["open_interest"], 96)
+        price_ret_4 = out["close"].pct_change(4) if "close" in out.columns else 0.0
+        out["price_oi_divergence"] = price_ret_4 - out["oi_change_pct"]
+        features.extend(["oi_change_pct", "oi_zscore", "price_oi_divergence"])
+
+    # --- Long / Short Ratio ---
+    if "long_short_ratio" in out.columns:
+        out["ls_ratio_zscore"] = zscore_rolling(out["long_short_ratio"], 48)
+        out["ls_extreme_long"] = (out["long_short_ratio"] > 2.0).astype(int)
+        out["ls_extreme_short"] = (out["long_short_ratio"] < 0.5).astype(int)
+        features.extend(
+            ["ls_ratio_zscore", "ls_extreme_long", "ls_extreme_short"]
+        )
+
+    # --- Liquidation Features ---
+    if "liq_long" in out.columns and "liq_short" in out.columns:
+        out["liq_imbalance"] = out["liq_long"] - out["liq_short"]
+        out["liq_spike"] = (
+            (out["liq_long"] + out["liq_short"]).rolling(4).mean()
+        )
+        features.extend(["liq_imbalance", "liq_spike"])
+
+    return out, features
+
+
+def add_volatility_regime_features(df: pd.DataFrame) -> Tuple[pd.DataFrame, List[str]]:
+    """
+    添加波动率 regime 相关特征:
+    - realized volatility 多尺度
+    - ATR 归一化
+    - Bollinger Band 宽度/位置
+    """
+    out = df.copy()
+    features: List[str] = []
+
+    if "close" not in out.columns:
+        return out, features
+
+    # Realized volatility
+    ret = out["close"].pct_change()
+    out["rv_1h"] = ret.rolling(4).std() * np.sqrt(4)
+    out["rv_4h"] = ret.rolling(16).std() * np.sqrt(16)
+    out["rv_24h"] = ret.rolling(96).std() * np.sqrt(96)
+    features.extend(["rv_1h", "rv_4h", "rv_24h"])
+
+    # Volatility ratio
+    out["vol_ratio"] = out["rv_1h"] / out["rv_24h"].replace(0, np.nan)
+    out["vol_ratio"] = out["vol_ratio"].replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    features.append("vol_ratio")
+
+    # ATR-based
+    if all(c in out.columns for c in ["high", "low", "close"]):
+        out["atr_14"] = calculate_atr(out, 14)
+        out["atr_normalized"] = out["atr_14"] / out["close"].replace(0, np.nan)
+        out["atr_normalized"] = out["atr_normalized"].replace(
+            [np.inf, -np.inf], np.nan
+        ).fillna(0.0)
+        if "atr_14" not in features:
+            features.append("atr_14")
+        features.append("atr_normalized")
+
+    # Bollinger Band width
+    close = out["close"]
+    bb_mid = close.rolling(20).mean()
+    bb_std = close.rolling(20).std()
+    bb_upper = bb_mid + 2 * bb_std
+    bb_lower = bb_mid - 2 * bb_std
+    out["bb_width"] = (bb_upper - bb_lower) / close.replace(0, np.nan)
+    out["bb_width"] = out["bb_width"].replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    out["bb_position"] = (close - bb_lower) / (bb_upper - bb_lower).replace(
+        0, np.nan
+    )
+    out["bb_position"] = out["bb_position"].fillna(0.5)
+    features.extend(["bb_width", "bb_position"])
+
+    return out, features
+
+
+def add_volume_microstructure_features(
+    df: pd.DataFrame,
+) -> Tuple[pd.DataFrame, List[str]]:
+    """
+    添加成交量与微观结构特征:
+    - volume ratio
+    - VWAP & 偏离
+    - taker buy/sell 比例
+    """
+    out = df.copy()
+    features: List[str] = []
+
+    if "volume" not in out.columns:
+        return out, features
+
+    vol = out["volume"]
+    out["volume_ma"] = vol.rolling(20).mean()
+    out["volume_ratio"] = vol / out["volume_ma"].replace(0, np.nan)
+    out["volume_ratio"] = out["volume_ratio"].replace(
+        [np.inf, -np.inf], np.nan
+    ).fillna(0.0)
+    features.extend(["volume_ma", "volume_ratio"])
+
+    # VWAP deviation
+    if "close" in out.columns:
+        vwap_num = (out["close"] * vol).rolling(96).sum()
+        vwap_den = vol.rolling(96).sum()
+        out["vwap_long"] = vwap_num / vwap_den.replace(0, np.nan)
+        out["vwap_deviation"] = (
+            out["close"] - out["vwap_long"]
+        ) / out["vwap_long"].replace(0, np.nan)
+        out["vwap_deviation"] = out["vwap_deviation"].replace(
+            [np.inf, -np.inf], np.nan
+        ).fillna(0.0)
+        features.extend(["vwap_long", "vwap_deviation"])
+
+    # Taker buy/sell ratio
+    if "taker_buy_volume" in out.columns:
+        safe_volume = out["volume"].replace(0, 1.0)
+        out["taker_ratio"] = out["taker_buy_volume"] / safe_volume
+        out["taker_ratio_ma"] = out["taker_ratio"].rolling(8).mean()
+        features.extend(["taker_ratio", "taker_ratio_ma"])
+
+    return out, features
 
 
 def create_all_features(data: pd.DataFrame, timestamp_col: Optional[str] = None) -> Tuple[pd.DataFrame, List[str]]:
@@ -303,6 +511,21 @@ def create_all_features(data: pd.DataFrame, timestamp_col: Optional[str] = None)
     if not regime_features.empty:
         df = pd.concat([df, regime_features], axis=1)
         features.extend(regime_features.columns.tolist())
+
+    # 8.1 Futures-specific features (if data available)
+    df, futures_features = add_futures_features(df)
+    if futures_features:
+        features.extend(futures_features)
+
+    # 8.2 Volatility regime feature group
+    df, vol_regime_features = add_volatility_regime_features(df)
+    if vol_regime_features:
+        features.extend(vol_regime_features)
+
+    # 8.3 Volume & microstructure feature group
+    df, microstructure_features = add_volume_microstructure_features(df)
+    if microstructure_features:
+        features.extend(microstructure_features)
     
     # 8.1. Higher timeframe trend regime
     if 'close' in df.columns:
@@ -496,8 +719,11 @@ def create_all_features(data: pd.DataFrame, timestamp_col: Optional[str] = None)
             df['rsi_trend_interaction'] = (df['rsi_14'] - 50) / 50 * df['trend_slope_20']
             features.append('rsi_trend_interaction')
     
-    # Fill NaN values
-    df[features] = df[features].bfill().fillna(0.0)
+    # Fill NaN values (ensure no duplicate feature names to avoid assignment shape issues)
+    unique_features = list(dict.fromkeys(features))
+    if unique_features:
+        df[unique_features] = df[unique_features].bfill().fillna(0.0)
+        features = unique_features
     
     # 10. Volatility Regime (ATR percentile)
     if all(col in df.columns for col in ['high', 'low', 'close']):

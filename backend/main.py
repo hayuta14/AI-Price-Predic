@@ -25,7 +25,8 @@ from backend.database.connection import (
     get_database_info
 )
 from backend.data.binance_fetcher import BinanceDataFetcher
-from backend.data.feature_engineering import create_all_features
+from backend.data.feature_engineering import create_all_features, create_targets
+from backend.core.regime_detector import RegimeDetector
 
 
 # Cấu hình logging
@@ -243,6 +244,16 @@ def main():
     # 3. Tạo đặc trưng
     logger.info("\n🔧 [BƯỚC 3/5] Tạo đặc trưng (features)...")
     data, features = create_sample_features(data)
+
+    # 3.1 Tạo target return-based và detect regime
+    data = create_targets(data, forward_periods=3, threshold=0.002)
+    regime_detector = RegimeDetector()
+    data = regime_detector.detect_regime(data)
+
+    # 3.1 Tạo target return-based và detect regime
+    data = create_targets(data, forward_periods=3, threshold=0.002)
+    regime_detector = RegimeDetector()
+    data = regime_detector.detect_regime(data)
     logger.info(f"✅ Đã tạo {len(features)} đặc trưng:")
     # Hiển thị theo nhóm
     feature_groups = {

@@ -18,6 +18,68 @@ from backend.core.walkforward_engine import WalkForwardEngine
 from backend.core.metrics import MetricsCalculator
 
 
+def quick_backtest(
+    signals: np.ndarray,
+    proba: Optional[np.ndarray],
+    prices: np.ndarray,
+    fee_rate: float = 0.0005,
+    funding_cost: float = 0.0001,
+) -> Dict[str, float]:
+    """Vectorized-like quick backtest loop for Optuna objective speed."""
+    equity = [1.0]
+    returns: List[float] = []
+    trades = 0
+
+    position = 0
+    entry_price = 0.0
+
+    n = min(len(signals), len(prices))
+    for i in range(max(0, n - 1)):
+        signal = int(signals[i])
+        confidence = float(np.max(proba[i])) if proba is not None and i < len(proba) else 0.6
+        size = max(0.0, min(confidence - 0.5, 0.3) * 2.0)
+
+        if position == 0 and signal != 0:
+            position = signal
+            entry_price = float(prices[i])
+            equity[-1] *= (1 - fee_rate)
+            trades += 1
+        elif position != 0 and entry_price > 0:
+            ret = position * (float(prices[i]) / entry_price - 1.0)
+            pnl_ret = ret * size - funding_cost
+            equity.append(equity[-1] * (1 + pnl_ret))
+            returns.append(pnl_ret)
+
+            if signal != position:
+                equity[-1] *= (1 - fee_rate)
+                position = 0
+
+    returns_arr = np.array(returns) if returns else np.array([0.0])
+    equity_arr = np.array(equity)
+
+    sharpe = (returns_arr.mean() / (returns_arr.std() + 1e-9)) * np.sqrt(252 * 96)
+    downside = returns_arr[returns_arr < 0]
+    sortino = (returns_arr.mean() / (downside.std() + 1e-9)) * np.sqrt(252 * 96) if len(downside) > 0 else 0.0
+
+    running_max = np.maximum.accumulate(equity_arr)
+    drawdowns = (equity_arr - running_max) / np.maximum(running_max, 1e-9)
+    max_dd = float(drawdowns.min()) if len(drawdowns) > 0 else 0.0
+
+    wins = returns_arr[returns_arr > 0]
+    losses = returns_arr[returns_arr < 0]
+    profit_factor = float(wins.sum() / (abs(losses.sum()) + 1e-9))
+    win_rate = float(len(wins) / (len(returns_arr) + 1e-9))
+
+    return {
+        'sharpe_ratio': float(sharpe),
+        'sortino_ratio': float(sortino),
+        'max_drawdown': max_dd,
+        'profit_factor': profit_factor,
+        'win_rate': win_rate,
+        'total_trades': int(trades),
+    }
+
+
 @dataclass
 class HyperparameterSet:
     """超参数集"""
@@ -164,13 +226,27 @@ class HyperparameterOptimizer:
                     metrics_fn=calculate_metrics
                 )
                 
-                # 返回平均Sharpe（作为优化目标）
+                # 返回平均Sharpe（作为优化目标）并记录辅助指标
                 sharpe = results.aggregated_metrics.get(
                     'mean_sharpe_ratio',
                     results.aggregated_metrics.get('sharpe_ratio', 0.0)
                 )
-                
-                return sharpe
+                max_dd = results.aggregated_metrics.get(
+                    'max_max_drawdown',
+                    results.aggregated_metrics.get('max_drawdown', 1.0)
+                )
+                total_trades = int(results.aggregated_metrics.get('total_total_trades', 0))
+
+                if total_trades < 10:
+                    return -999.0
+
+                score = sharpe - (0.5 * max(0.0, max_dd - 0.15))
+
+                trial.set_user_attr('sharpe', float(sharpe))
+                trial.set_user_attr('max_dd', float(max_dd))
+                trial.set_user_attr('total_trades', int(total_trades))
+
+                return float(score)
             except Exception as e:
                 print(f"Trial失败: {e}")
                 return -np.inf

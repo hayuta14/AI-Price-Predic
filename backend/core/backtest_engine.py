@@ -103,6 +103,15 @@ class BacktestEngine:
         self.metrics_calculator = MetricsCalculator(periods_per_year=365 * 24 * 4)
         self.daily_metrics_calculator = MetricsCalculator(periods_per_year=365)
         self.trade_counter = 0
+        # Realistic execution simulator (fees, slippage, funding)
+        self.execution_simulator = RealisticExecutionSimulator(
+            {
+                "taker_fee": self.trading_config.fee_rate,
+                "maker_fee": self.trading_config.fee_rate * 0.4,
+                "slippage_k": self.trading_config.slippage_rate,
+                "funding_interval": 32,
+            }
+        )
     
     def reset(self, initial_equity: Optional[float] = None):
         """
@@ -133,16 +142,22 @@ class BacktestEngine:
         Returns:
             考虑滑点后的价格
         """
-        slippage = price * self.trading_config.slippage_rate
-        
-        if direction == TradeDirection.LONG:
-            # 做多：买入价更高（不利滑点）
-            return price + slippage
-        elif direction == TradeDirection.SHORT:
-            # 做空：卖出价更低（不利滑点）
-            return price - slippage
-        else:
+        # 使用RealisticExecutionSimulator，根据波动率/成交量估算滑点.
+        # 当前实现中如果缺少微观结构特征，则退化为固定比例滑点。
+        # 这里使用一个保守的基准波动率和成交量比率占位。
+        baseline_vol = 0.01
+        volume_ratio = 1.0
+        side = 1 if direction == TradeDirection.LONG else -1 if direction == TradeDirection.SHORT else 0
+        if side == 0:
             return price
+
+        exec_info = self.execution_simulator.calculate_fill_price(
+            order_price=price,
+            side=side,
+            current_volatility=baseline_vol,
+            volume_ratio=volume_ratio,
+        )
+        return float(exec_info["fill_price"])
     
     def _calculate_fees(self, position_value: float) -> float:
         """
@@ -160,26 +175,25 @@ class BacktestEngine:
         self,
         position_value: float,
         direction: TradeDirection,
-        hours: float = 8.0
+        hours: float = 8.0,
     ) -> float:
         """
-        计算资金费率成本（占位符实现）
-        
-        Args:
-            position_value: 仓位价值
-            direction: 交易方向
-            hours: 持仓小时数
-            
-        Returns:
-            资金费率成本
+        使用RealisticExecutionSimulator按8小时节奏计算资金费率成本.
         """
-        # 简化实现：每8小时收取一次资金费率
-        # 做多支付，做空收取（简化）
-        if direction == TradeDirection.LONG:
-            return position_value * self.trading_config.funding_rate * (hours / 8.0)
-        elif direction == TradeDirection.SHORT:
-            return -position_value * self.trading_config.funding_rate * (hours / 8.0)
-        return 0.0
+        side = 1 if direction == TradeDirection.LONG else -1 if direction == TradeDirection.SHORT else 0
+        if side == 0 or position_value <= 0:
+            return 0.0
+
+        candles_held = int(hours * 4)  # 15m bars per hour
+        return float(
+            self.execution_simulator.calculate_funding_cost(
+                position_size=1.0,
+                position_value=position_value,
+                side=side,
+                funding_rate=self.trading_config.funding_rate,
+                candles_held=candles_held,
+            )
+        )
     
     def enter_trade(
         self,
@@ -509,6 +523,97 @@ class BacktestEngine:
             trade_log=trade_log,
             daily_returns=daily_returns
         )
+
+
+class RealisticExecutionSimulator:
+    """
+    更加贴近期货交易现实的执行模拟:
+    - 手续费 (taker/maker)
+    - 波动率驱动的滑点
+    - 成交量不足时的部分成交
+    - 周期性资金费率
+    """
+
+    def __init__(self, config: Dict) -> None:
+        self.base_fee: float = float(config.get("taker_fee", 0.0005))
+        self.maker_fee: float = float(config.get("maker_fee", 0.0002))
+        self.slippage_k: float = float(config.get("slippage_k", 0.1))
+        # 32 * 15m = 8h
+        self.funding_interval: int = int(config.get("funding_interval", 32))
+
+    def calculate_fill_price(
+        self,
+        order_price: float,
+        side: int,
+        current_volatility: float,
+        volume_ratio: float,
+    ) -> Dict[str, float]:
+        """
+        根据波动率 & 流动性估算实际成交价.
+
+        Args:
+            order_price: 下单价格
+            side: 1=buy, -1=sell
+            current_volatility: 当前波动率（例如15m收益率的rolling std）
+            volume_ratio: 当前成交量与均值之比 (>1流动性更好)
+        """
+        # Slippage 基于波动率
+        slippage_pct = self.slippage_k * max(current_volatility, 0.0)
+
+        # 流动性较好 -> 滑点略小；流动性较差 -> 滑点放大
+        if volume_ratio > 1.5:
+            slippage_pct *= 0.7
+        elif volume_ratio < 0.5:
+            slippage_pct *= 1.5
+
+        slippage_pct = max(slippage_pct, 0.0)
+
+        # 按交易方向施加不利滑点
+        fill_price = order_price * (1.0 + side * slippage_pct)
+
+        return {
+            "fill_price": float(fill_price),
+            "slippage_cost": float(abs(fill_price - order_price) / max(order_price, 1e-9)),
+            "fee": float(self.base_fee),
+        }
+
+    def calculate_funding_cost(
+        self,
+        position_size: float,
+        position_value: float,
+        side: int,
+        funding_rate: float,
+        candles_held: int,
+    ) -> float:
+        """
+        资金费率每 funding_interval 根K线收取一次.
+
+        正资金费率 -> 多头支付空头.
+        """
+        if candles_held <= 0 or position_value <= 0:
+            return 0.0
+
+        payments = candles_held // max(self.funding_interval, 1)
+        if payments <= 0:
+            return 0.0
+
+        # side=1 多头; side=-1 空头; 正 funding_rate 时多头付钱
+        cost_per_payment = funding_rate * position_value * side
+        # 我们关心的是成本 => 对策略而言是pnl的减少
+        return float(cost_per_payment * payments)
+
+    def simulate_partial_fill(
+        self,
+        order_size: float,
+        available_liquidity: float,
+    ) -> float:
+        """
+        模拟在流动性不足时的部分成交比例.
+        """
+        if order_size <= 0:
+            return 0.0
+        fill_ratio = min(1.0, max(available_liquidity, 0.0) / (order_size * 1.5))
+        return float(order_size * fill_ratio)
     
     def _generate_trade_log(self) -> pd.DataFrame:
         """生成交易日志DataFrame"""
