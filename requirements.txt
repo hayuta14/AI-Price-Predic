@@ -20,3 +20,5 @@ pymongo>=4.5.0
 
 # 工具
 python-dotenv>=1.0.0
+requests>=2.31.0
+python-binance>=1.0.19

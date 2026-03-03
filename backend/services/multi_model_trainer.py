@@ -95,26 +95,14 @@ class MultiModelTrainer:
             from backend.optimization.label_optimizer import LabelOptimizer
             label_optimizer = LabelOptimizer(self.walkforward_engine, None)
             
-            use_dynamic = label_config.threshold < 0
-            # Sử dụng default_atr_multiplier từ config (0.5)
-            from backend.config import config
-            default_atr_mult = config.label.default_atr_multiplier if hasattr(config.label, 'default_atr_multiplier') else 0.5
-            atr_multiplier = abs(label_config.threshold) if use_dynamic else default_atr_mult
-            threshold = label_config.threshold if not use_dynamic else 0.0
-            
-            atr_values = None
-            if use_dynamic and all(col in data.columns for col in ['high', 'low', 'close']):
-                from backend.data.feature_engineering import calculate_atr
-                atr_values = calculate_atr(data, 14)
-            
-            labels = label_optimizer.create_labels(
+            labels = label_optimizer.create_triple_barrier_labels(
                 data=data,
                 price_col=price_col,
                 horizon=label_config.horizon,
-                threshold=threshold,
-                use_dynamic_threshold=use_dynamic,
-                atr_values=atr_values,
-                atr_multiplier=atr_multiplier
+                sl_multiplier=label_config.sl_multiplier,
+                tp_multiplier=label_config.tp_multiplier,
+                atr_period=14,
+                min_ret=label_config.min_ret
             )
             
             # Chuẩn bị data
@@ -261,25 +249,14 @@ class MultiModelTrainer:
                         from backend.optimization.label_optimizer import LabelOptimizer
                         label_optimizer = LabelOptimizer(self.walkforward_engine, None)
 
-                        use_dynamic = candidate.label_config.threshold < 0
-                        from backend.config import config
-                        default_atr_mult = config.label.default_atr_multiplier if hasattr(config.label, 'default_atr_multiplier') else 0.5
-                        atr_multiplier = abs(candidate.label_config.threshold) if use_dynamic else default_atr_mult
-                        threshold = candidate.label_config.threshold if not use_dynamic else 0.0
-
-                        atr_values = None
-                        if use_dynamic and all(col in data.columns for col in ['high', 'low', 'close']):
-                            from backend.data.feature_engineering import calculate_atr
-                            atr_values = calculate_atr(data, 14)
-
-                        labels = label_optimizer.create_labels(
+                        labels = label_optimizer.create_triple_barrier_labels(
                             data=data,
                             price_col=price_col,
                             horizon=candidate.label_config.horizon,
-                            threshold=threshold,
-                            use_dynamic_threshold=use_dynamic,
-                            atr_values=atr_values,
-                            atr_multiplier=atr_multiplier
+                            sl_multiplier=candidate.label_config.sl_multiplier,
+                            tp_multiplier=candidate.label_config.tp_multiplier,
+                            atr_period=14,
+                            min_ret=candidate.label_config.min_ret
                         )
 
                         valid_data = data.iloc[:-candidate.label_config.horizon].copy() if candidate.label_config.horizon > 0 else data.copy()

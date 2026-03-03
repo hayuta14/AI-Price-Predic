@@ -33,6 +33,8 @@ class ModelRun(Base):
     
     # 性能指标
     sharpe_ratio = Column(Float, nullable=True)
+    sortino_ratio = Column(Float, nullable=True)
+    omega_ratio = Column(Float, nullable=True)
     max_drawdown = Column(Float, nullable=True)
     profit_factor = Column(Float, nullable=True)
     calmar_ratio = Column(Float, nullable=True)
@@ -41,6 +43,10 @@ class ModelRun(Base):
     volatility = Column(Float, nullable=True)
     win_rate = Column(Float, nullable=True)
     total_trades = Column(Integer, nullable=True)
+    max_consecutive_losses = Column(Integer, nullable=True)
+    max_consecutive_wins = Column(Integer, nullable=True)
+    avg_trade_duration = Column(Float, nullable=True)  # 小时
+    expectancy = Column(Float, nullable=True)
     
     # 稳定性指标
     sharpe_stability = Column(Float, nullable=True)  # 跨状态Sharpe标准差
@@ -62,6 +68,8 @@ class ModelRun(Base):
             'risk_config': self.risk_config,
             'hyperparams': self.hyperparams,
             'sharpe_ratio': self.sharpe_ratio,
+            'sortino_ratio': self.sortino_ratio,
+            'omega_ratio': self.omega_ratio,
             'max_drawdown': self.max_drawdown,
             'profit_factor': self.profit_factor,
             'calmar_ratio': self.calmar_ratio,
@@ -70,6 +78,10 @@ class ModelRun(Base):
             'volatility': self.volatility,
             'win_rate': self.win_rate,
             'total_trades': self.total_trades,
+            'max_consecutive_losses': self.max_consecutive_losses,
+            'max_consecutive_wins': self.max_consecutive_wins,
+            'avg_trade_duration': self.avg_trade_duration,
+            'expectancy': self.expectancy,
             'sharpe_stability': self.sharpe_stability,
             'regime_metrics': self.regime_metrics,
             'created_at': self.created_at.isoformat() if self.created_at else None,

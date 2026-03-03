@@ -12,7 +12,7 @@ Walk-Forward验证引擎
 - 不允许任何未来信息泄露
 - 支持扩展窗口（训练集累积增长）和滚动窗口（固定大小）
 """
-from typing import List, Dict, Tuple, Optional, Any
+from typing import List, Dict, Tuple, Optional, Any, Callable
 from dataclasses import dataclass
 import pandas as pd
 import numpy as np
@@ -68,10 +68,88 @@ class WalkForwardEngine:
         self.config = config
         self.folds: List[WalkForwardFold] = []
     
+    def purge_training_data(
+        self,
+        train_data: pd.DataFrame,
+        test_start: datetime,
+        horizon_bars: int,
+        bar_duration_minutes: int = 15,
+        date_column: str = "timestamp",
+    ) -> pd.DataFrame:
+        """
+        Remove training samples whose label window overlaps test period.
+
+        A training sample at time T has label window [T, T + horizon_duration].
+        We must purge if T + horizon_duration >= test_start.
+
+        Args:
+            train_data: Training samples for a given fold.
+            test_start: Nominal start timestamp of the test period (before embargo).
+            horizon_bars: Label horizon in number of bars.
+            bar_duration_minutes: Duration of a single bar in minutes.
+            date_column: Name of the timestamp column.
+
+        Returns:
+            Purged training DataFrame.
+        """
+        if horizon_bars is None or horizon_bars <= 0:
+            # Nothing to purge
+            return train_data
+
+        if date_column not in train_data.columns:
+            raise ValueError(f"日期列 '{date_column}' 不存在于训练数据中")
+
+        horizon_duration = pd.Timedelta(minutes=bar_duration_minutes * horizon_bars)
+
+        # A training sample at time T has label window [T, T + horizon_duration]
+        label_end_time = train_data[date_column] + horizon_duration
+        purged = train_data[label_end_time < test_start]
+
+        n_purged = len(train_data) - len(purged)
+        if n_purged > 0:
+            print(f"   Purged {n_purged} samples with overlapping label windows")
+
+        return purged
+
+    def validate_purging(
+        self,
+        train_data: pd.DataFrame,
+        test_data: pd.DataFrame,
+        horizon_bars: int,
+        bar_duration_minutes: int = 15,
+        date_column: str = "timestamp",
+    ) -> None:
+        """
+        Validate that no training label window leaks into the test period.
+
+        Asserts that max(train_timestamp) + horizon_duration < min(test_timestamp).
+        """
+        if horizon_bars is None or horizon_bars <= 0:
+            return
+
+        if date_column not in train_data.columns or date_column not in test_data.columns:
+            raise ValueError(f"日期列 '{date_column}' 不存在于train/test数据中")
+
+        horizon_duration = pd.Timedelta(minutes=bar_duration_minutes * horizon_bars)
+
+        if len(train_data) == 0 or len(test_data) == 0:
+            return
+
+        max_train_ts = train_data[date_column].max()
+        min_test_ts = test_data[date_column].min()
+
+        assert max_train_ts + horizon_duration < min_test_ts, (
+            "Data leakage detected: training label window overlaps with test period. "
+            f"max_train_ts + horizon_duration = {max_train_ts + horizon_duration}, "
+            f"min_test_ts = {min_test_ts}"
+        )
+    
     def generate_folds(
         self, 
         data: pd.DataFrame,
-        date_column: str = 'timestamp'
+        date_column: str = 'timestamp',
+        horizon_bars: Optional[int] = None,
+        bar_duration_minutes: int = 15,
     ) -> List[WalkForwardFold]:
         """
         生成walk-forward folds
@@ -154,21 +232,72 @@ class WalkForwardEngine:
                     # 跳过这个fold，继续下一个
                     train_end = test_end
                     continue
-            
-            # 严格验证：确保训练集时间 < 测试集时间
+
+            # 应用 purging 和 embargo 以避免 label overlap / forward-contamination
+            embargo_bars = getattr(self.config, "embargo_bars", 0)
+
+            # 默认统计变量
+            n_purged = 0
+
+            if embargo_bars and embargo_bars > 0:
+                # PURGING: 移除 label window 与测试期重叠的训练样本
+                original_train_len = len(train_data)
+                train_data = self.purge_training_data(
+                    train_data=train_data,
+                    test_start=test_start,
+                    horizon_bars=embargo_bars if horizon_bars is None else horizon_bars,
+                    bar_duration_minutes=bar_duration_minutes,
+                    date_column=date_column,
+                )
+                n_purged = original_train_len - len(train_data)
+
+                # EMBARGO: 在训练集结束后加一段空白期再开始测试
+                actual_test_start = train_end + timedelta(
+                    minutes=bar_duration_minutes * embargo_bars
+                )
+                test_data = test_data[test_data[date_column] >= actual_test_start]
+
+                # 如果因为embargo导致没有测试数据，则跳过该fold
+                if len(test_data) == 0:
+                    train_end = test_end
+                    continue
+
+                # 进一步验证：训练标签窗口不与测试期重叠
+                # 如果外部传入 horizon_bars（来自 label_config.horizon），则优先使用
+                effective_horizon_bars = embargo_bars if horizon_bars is None else horizon_bars
+                self.validate_purging(
+                    train_data=train_data,
+                    test_data=test_data,
+                    horizon_bars=effective_horizon_bars,
+                    bar_duration_minutes=bar_duration_minutes,
+                    date_column=date_column,
+                )
+
+            # 严格验证：确保训练集时间 < 测试集时间（在应用embargo之后）
             if train_data[date_column].max() >= test_data[date_column].min():
                 raise ValueError(
                     f"Fold {fold_id}: 时间顺序错误！"
                     f"训练集结束时间 {train_data[date_column].max()} "
                     f"必须 < 测试集开始时间 {test_data[date_column].min()}"
                 )
-            
-            # 创建fold
+
+            # 日志：每个fold的样本数量与purging/embargo统计
+            print(
+                f"Fold {fold_id}: train={len(train_data)}, "
+                f"purged={n_purged}, test={len(test_data)}, "
+                f"embargo={embargo_bars} bars"
+            )
+
+            # 创建fold（test_start 使用应用embargo后的实际开始时间）
+            # 如果没有embargo，则 actual_test_start == test_start
+            actual_test_start_for_fold = (
+                test_data[date_column].min() if len(test_data) > 0 else test_start
+            )
             fold = WalkForwardFold(
                 fold_id=fold_id,
                 train_start=train_start,
                 train_end=train_end,
-                test_start=test_start,
+                test_start=actual_test_start_for_fold,
                 test_end=test_end,
                 train_size=len(train_data),
                 test_size=len(test_data),
@@ -251,6 +380,8 @@ class WalkForwardEngine:
         model_predict_fn,
         metrics_fn,
         date_column: str = 'timestamp',
+        feature_engineering_fn: Optional[Callable[[pd.DataFrame], Any]] = None,
+        warm_up_bars: int = 200,
         **kwargs
     ) -> WalkForwardResults:
         """
@@ -262,6 +393,8 @@ class WalkForwardEngine:
             model_predict_fn: 模型预测函数 (model, test_data) -> predictions
             metrics_fn: 指标计算函数 (predictions, test_data) -> dict
             date_column: 日期列名
+            feature_engineering_fn: 每个fold内执行特征工程的函数，避免全局预计算泄漏
+            warm_up_bars: 测试集特征计算的预热窗口长度
             **kwargs: 传递给训练函数的额外参数
             
         Returns:
@@ -294,14 +427,37 @@ class WalkForwardEngine:
         fold_metrics = []
         
         for fold in folds:
+            train_data = fold.train_data.copy()
+            test_data = fold.test_data.copy()
+
+            if feature_engineering_fn is not None:
+                test_warmup_source = pd.concat(
+                    [train_data.tail(warm_up_bars), test_data],
+                    axis=0,
+                )
+
+                train_feature_output = feature_engineering_fn(train_data)
+                if isinstance(train_feature_output, tuple):
+                    train_data = train_feature_output[0]
+                else:
+                    train_data = train_feature_output
+
+                test_feature_output = feature_engineering_fn(test_warmup_source)
+                if isinstance(test_feature_output, tuple):
+                    test_with_warmup = test_feature_output[0]
+                else:
+                    test_with_warmup = test_feature_output
+
+                test_data = test_with_warmup.tail(len(test_data)).copy()
+
             # 训练模型（严格使用训练集）
-            model = model_train_fn(fold.train_data, **kwargs)
+            model = model_train_fn(train_data, **kwargs)
             
             # 预测（严格使用测试集）
-            predictions = model_predict_fn(model, fold.test_data)
+            predictions = model_predict_fn(model, test_data)
             
             # 计算指标
-            metrics = metrics_fn(predictions, fold.test_data)
+            metrics = metrics_fn(predictions, test_data)
             metrics['fold_id'] = fold.fold_id
             fold_metrics.append(metrics)
         

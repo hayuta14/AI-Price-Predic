@@ -114,17 +114,25 @@ class ModelRunRepository:
         
         return query.offset(skip).limit(limit).all()
     
-    def get_top_by_sharpe(self, top_n: int = 5) -> List[ModelRun]:
+    def get_top_by_sharpe(self, top_n: int = 5) -> List[Any]:
         """
         获取Sharpe比率最高的N个模型运行
+
+        仅查询展示所需字段，避免因数据库表尚未包含新增列导致查询失败。
         
         Args:
             top_n: 返回数量
             
         Returns:
-            ModelRun列表
+            包含展示字段的记录列表
         """
-        return self.db.query(ModelRun).filter(
+        return self.db.query(
+            ModelRun.id,
+            ModelRun.sharpe_ratio,
+            ModelRun.max_drawdown,
+            ModelRun.profit_factor,
+            ModelRun.total_trades,
+        ).filter(
             ModelRun.sharpe_ratio.isnot(None)
         ).order_by(desc(ModelRun.sharpe_ratio)).limit(top_n).all()
     

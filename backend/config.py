@@ -28,6 +28,7 @@ class WalkForwardConfig:
     expanding_window: bool = True  # Có sử dụng cửa sổ mở rộng không (True=mở rộng, False=cuộn)
     min_n_folds: int = 5          # Số folds tối thiểu (để kiểm tra robustness)
     max_n_folds: int = 10         # Số folds tối đa
+    embargo_bars: int = 10        # Số nến bị "embargo" giữa train_end và test_start (để tránh forward-contamination)
 
 
 @dataclass

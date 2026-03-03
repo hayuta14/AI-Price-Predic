@@ -23,6 +23,8 @@ from dataclasses import dataclass
 class PerformanceMetrics:
     """性能指标数据类"""
     sharpe_ratio: float
+    sortino_ratio: float
+    omega_ratio: float
     max_drawdown: float
     profit_factor: float
     calmar_ratio: float
@@ -35,8 +37,12 @@ class PerformanceMetrics:
     total_trades: int
     winning_trades: int
     losing_trades: int
-    max_dd_duration: int  # 最大回撤持续时间（天数）
-    recovery_factor: float  # 恢复因子 = 总收益 / 最大回撤
+    max_consecutive_losses: int
+    max_consecutive_wins: int
+    avg_trade_duration: float  # 平均持仓时间（小时）
+    expectancy: float          # 期望收益（每单位风险的平均收益）
+    max_dd_duration: int       # 最大回撤持续时间（天数）
+    recovery_factor: float     # 恢复因子 = 总收益 / 最大回撤
 
 
 class MetricsCalculator:
@@ -52,11 +58,33 @@ class MetricsCalculator:
         
         Args:
             risk_free_rate: 无风险利率（年化）
-            periods_per_year: 每年交易周期数（15分钟K线：365*24*4=35040）
+            periods_per_year: 每年交易周期数（例如：
+                - 15分钟K线：365*24*4=35040
+                - 小时K线：365*24=8760
+                - 日K线：252（交易日）
+            )
         """
         self.risk_free_rate = risk_free_rate
         self.periods_per_year = periods_per_year
     
+    # ------------------------------------------------------------------
+    # 工厂方法：标准化不同周期的年化参数
+    # ------------------------------------------------------------------
+    @staticmethod
+    def for_15min_bars(risk_free_rate: float = 0.0) -> "MetricsCalculator":
+        """针对15分钟K线的指标计算器（每年35040个周期）"""
+        return MetricsCalculator(risk_free_rate=risk_free_rate, periods_per_year=365 * 24 * 4)
+
+    @staticmethod
+    def for_daily_bars(risk_free_rate: float = 0.0) -> "MetricsCalculator":
+        """针对日K线的指标计算器（每年252个交易日）"""
+        return MetricsCalculator(risk_free_rate=risk_free_rate, periods_per_year=252)
+
+    @staticmethod
+    def for_hourly_bars(risk_free_rate: float = 0.0) -> "MetricsCalculator":
+        """针对小时K线的指标计算器（每年8760个周期）"""
+        return MetricsCalculator(risk_free_rate=risk_free_rate, periods_per_year=365 * 24)
+
     def calculate_sharpe_ratio(
         self, 
         returns: Union[pd.Series, np.ndarray],
@@ -208,6 +236,79 @@ class MetricsCalculator:
             return float('inf') if profits > 0 else 0.0
         
         return profits / losses
+
+    def calculate_sortino_ratio(
+        self,
+        returns: Union[pd.Series, np.ndarray],
+        target_return: float = 0.0,
+    ) -> float:
+        """
+        计算Sortino比率（只考虑下行波动）
+        """
+        returns = pd.Series(returns) if not isinstance(returns, pd.Series) else returns
+        returns = returns.dropna()
+
+        if len(returns) == 0:
+            return 0.0
+
+        downside_returns = returns[returns < target_return]
+        if len(downside_returns) == 0:
+            return 0.0
+
+        downside_std = downside_returns.std()
+        if downside_std == 0:
+            return 0.0
+
+        mean_return = returns.mean()
+        sortino = (mean_return - target_return) / downside_std
+        return float(sortino * np.sqrt(self.periods_per_year))
+
+    def calculate_omega_ratio(
+        self,
+        returns: Union[pd.Series, np.ndarray],
+        threshold: float = 0.0,
+    ) -> float:
+        """
+        计算Omega比率：收益大于阈值的期望 / 收益低于阈值的期望
+        """
+        returns = pd.Series(returns) if not isinstance(returns, pd.Series) else returns
+        returns = returns.dropna()
+
+        if len(returns) == 0:
+            return 0.0
+
+        gains = returns[returns > threshold] - threshold
+        losses = threshold - returns[returns <= threshold]
+
+        if losses.sum() == 0:
+            # 没有下行损失，Omega视为无限大
+            return float("inf") if gains.sum() > 0 else 0.0
+
+        return float(gains.sum() / losses.sum())
+
+    def calculate_expectancy(
+        self,
+        returns: Union[pd.Series, np.ndarray],
+    ) -> float:
+        """
+        Kelly风格的期望收益：
+        expectancy = win_rate * avg_win - loss_rate * avg_loss
+        """
+        returns = pd.Series(returns) if not isinstance(returns, pd.Series) else returns
+        returns = returns.dropna()
+
+        if len(returns) == 0:
+            return 0.0
+
+        wins = returns[returns > 0]
+        losses = returns[returns < 0]
+
+        win_rate = len(wins) / len(returns)
+        loss_rate = len(losses) / len(returns)
+        avg_win = wins.mean() if len(wins) > 0 else 0.0
+        avg_loss = abs(losses.mean()) if len(losses) > 0 else 0.0
+
+        return float((win_rate * avg_win) - (loss_rate * avg_loss))
     
     def calculate_calmar_ratio(
         self,
@@ -320,7 +421,7 @@ class MetricsCalculator:
     def calculate_all_metrics(
         self,
         returns: Union[pd.Series, np.ndarray],
-        equity_curve: Optional[Union[pd.Series, np.ndarray]] = None
+        equity_curve: Optional[Union[pd.Series, np.ndarray]] = None,
     ) -> PerformanceMetrics:
         """
         计算所有性能指标
@@ -339,6 +440,8 @@ class MetricsCalculator:
             # 返回零值指标
             return PerformanceMetrics(
                 sharpe_ratio=0.0,
+                sortino_ratio=0.0,
+                omega_ratio=0.0,
                 max_drawdown=0.0,
                 profit_factor=0.0,
                 calmar_ratio=0.0,
@@ -351,8 +454,12 @@ class MetricsCalculator:
                 total_trades=0,
                 winning_trades=0,
                 losing_trades=0,
+                max_consecutive_losses=0,
+                max_consecutive_wins=0,
+                avg_trade_duration=0.0,
+                expectancy=0.0,
                 max_dd_duration=0,
-                recovery_factor=0.0
+                recovery_factor=0.0,
             )
         
         # 计算权益曲线（如果未提供）
@@ -363,39 +470,141 @@ class MetricsCalculator:
         
         # 计算各项指标
         sharpe = self.calculate_sharpe_ratio(returns)
+        sortino = self.calculate_sortino_ratio(returns)
+        omega = self.calculate_omega_ratio(returns)
         max_dd, max_dd_duration, _ = self.calculate_max_drawdown(equity_curve)
         profit_factor = self.calculate_profit_factor(returns)
         calmar = self.calculate_calmar_ratio(returns, equity_curve)
-        
+
         # 收益率统计
         total_return = (1 + returns).prod() - 1
         n_periods = len(returns)
         annualized_return = (1 + total_return) ** (self.periods_per_year / n_periods) - 1
         volatility = returns.std() * np.sqrt(self.periods_per_year)
-        
+
         # 交易统计
         trade_stats = self.calculate_trade_statistics(returns)
-        
+
+        # 连续盈利/亏损统计（基于收益率符号）
+        max_consecutive_wins = 0
+        max_consecutive_losses = 0
+        current_wins = 0
+        current_losses = 0
+
+        for r in returns:
+            if r > 0:
+                current_wins += 1
+                current_losses = 0
+            elif r < 0:
+                current_losses += 1
+                current_wins = 0
+            else:
+                # 零收益视为打断连续序列
+                current_wins = 0
+                current_losses = 0
+
+            max_consecutive_wins = max(max_consecutive_wins, current_wins)
+            max_consecutive_losses = max(max_consecutive_losses, current_losses)
+
+        # 平均“交易”持续时间：按连续非零收益段的长度估算
+        # 每个周期对应的小时数从periods_per_year反推
+        hours_per_period = 0.0
+        if self.periods_per_year > 0:
+            hours_per_period = 365.0 * 24.0 / float(self.periods_per_year)
+
+        streak_lengths: List[int] = []
+        current_streak = 0
+        last_sign = 0
+
+        for r in returns:
+            sign = 1 if r > 0 else (-1 if r < 0 else 0)
+            if sign == 0:
+                if current_streak > 0:
+                    streak_lengths.append(current_streak)
+                current_streak = 0
+                last_sign = 0
+                continue
+
+            if sign == last_sign or last_sign == 0:
+                current_streak += 1
+            else:
+                if current_streak > 0:
+                    streak_lengths.append(current_streak)
+                current_streak = 1
+            last_sign = sign
+
+        if current_streak > 0:
+            streak_lengths.append(current_streak)
+
+        avg_trade_duration_hours = (
+            float(np.mean(streak_lengths) * hours_per_period) if streak_lengths and hours_per_period > 0 else 0.0
+        )
+
+        # 期望收益
+        expectancy = self.calculate_expectancy(returns)
+
         # 恢复因子
         recovery_factor = total_return / max_dd if max_dd > 0 else 0.0
-        
+
         return PerformanceMetrics(
             sharpe_ratio=sharpe,
+            sortino_ratio=sortino,
+            omega_ratio=omega,
             max_drawdown=max_dd,
             profit_factor=profit_factor,
             calmar_ratio=calmar,
             total_return=total_return,
             annualized_return=annualized_return,
             volatility=volatility,
-            win_rate=trade_stats['win_rate'],
-            avg_win=trade_stats['avg_win'],
-            avg_loss=trade_stats['avg_loss'],
-            total_trades=trade_stats['total_trades'],
-            winning_trades=trade_stats['winning_trades'],
-            losing_trades=trade_stats['losing_trades'],
+            win_rate=trade_stats["win_rate"],
+            avg_win=trade_stats["avg_win"],
+            avg_loss=trade_stats["avg_loss"],
+            total_trades=trade_stats["total_trades"],
+            winning_trades=trade_stats["winning_trades"],
+            losing_trades=trade_stats["losing_trades"],
+            max_consecutive_losses=int(max_consecutive_losses),
+            max_consecutive_wins=int(max_consecutive_wins),
+            avg_trade_duration=avg_trade_duration_hours,
+            expectancy=expectancy,
             max_dd_duration=max_dd_duration,
-            recovery_factor=recovery_factor
+            recovery_factor=recovery_factor,
         )
+
+    # ------------------------------------------------------------------
+    # 报表输出
+    # ------------------------------------------------------------------
+    def print_full_report(self, metrics: PerformanceMetrics) -> None:
+        """打印完整的hedge-fund标准性能报表"""
+        lines = []
+        lines.append("====== Performance Report (Hedge-Fund Standard) ======")
+        lines.append(f"Total Return:           {metrics.total_return:>10.2%}")
+        lines.append(f"Annualized Return:      {metrics.annualized_return:>10.2%}")
+        lines.append(f"Volatility:             {metrics.volatility:>10.2%}")
+        lines.append("")
+        lines.append(f"Sharpe Ratio:           {metrics.sharpe_ratio:>10.3f}")
+        lines.append(f"Sortino Ratio:          {metrics.sortino_ratio:>10.3f}")
+        lines.append(f"Omega Ratio:            {metrics.omega_ratio:>10.3f}")
+        lines.append(f"Calmar Ratio:           {metrics.calmar_ratio:>10.3f}")
+        lines.append("")
+        lines.append(f"Max Drawdown:           {metrics.max_drawdown:>10.2%}")
+        lines.append(f"Max DD Duration:        {metrics.max_dd_duration:>10d} days")
+        lines.append(f"Recovery Factor:        {metrics.recovery_factor:>10.3f}")
+        lines.append("")
+        lines.append(f"Win Rate:               {metrics.win_rate:>10.2%}")
+        lines.append(f"Total Trades:           {metrics.total_trades:>10d}")
+        lines.append(f"Winning Trades:         {metrics.winning_trades:>10d}")
+        lines.append(f"Losing Trades:          {metrics.losing_trades:>10d}")
+        lines.append(f"Avg Win:                {metrics.avg_win:>10.4f}")
+        lines.append(f"Avg Loss:               {metrics.avg_loss:>10.4f}")
+        lines.append(f"Max Consecutive Wins:   {metrics.max_consecutive_wins:>10d}")
+        lines.append(f"Max Consecutive Losses: {metrics.max_consecutive_losses:>10d}")
+        lines.append("")
+        lines.append(f"Avg Trade Duration:     {metrics.avg_trade_duration:>10.2f} hours")
+        lines.append(f"Expectancy:             {metrics.expectancy:>10.4f} per unit risk")
+        lines.append("======================================================")
+
+        report = "\n".join(lines)
+        print(report)
     
     def calculate_regime_metrics(
         self,

@@ -138,25 +138,14 @@ class OptimizationService:
         print(f"Cấu hình nhãn tối ưu: horizon={label_config.horizon}, threshold={label_config.threshold}")
         
         # Tạo label từ label_config đã tối ưu để sử dụng cho feature optimization
-        # Kiểm tra xem có phải dynamic threshold không (threshold < 0)
-        use_dynamic = label_config.threshold < 0
-        atr_multiplier = abs(label_config.threshold) if use_dynamic else self.config.label.default_atr_multiplier
-        threshold = label_config.threshold if not use_dynamic else 0.0
-        
-        # Tính ATR nếu cần
-        atr_values = None
-        if use_dynamic and all(col in data.columns for col in ['high', 'low', 'close']):
-            from backend.data.feature_engineering import calculate_atr
-            atr_values = calculate_atr(data, 14)
-        
-        labels = self.label_optimizer.create_labels(
+        labels = self.label_optimizer.create_triple_barrier_labels(
             data=data,
             price_col=price_col,
             horizon=label_config.horizon,
-            threshold=threshold,
-            use_dynamic_threshold=use_dynamic,
-            atr_values=atr_values,
-            atr_multiplier=atr_multiplier
+            sl_multiplier=label_config.sl_multiplier,
+            tp_multiplier=label_config.tp_multiplier,
+            atr_period=14,
+            min_ret=label_config.min_ret
         )
         data_with_label = data.copy()
         valid_data_for_features = data_with_label.iloc[:-label_config.horizon].copy() if label_config.horizon > 0 else data_with_label.copy()
@@ -620,25 +609,14 @@ class OptimizationService:
         from backend.optimization.label_optimizer import LabelOptimizer
         label_opt = LabelOptimizer(self.walkforward_engine, self.config.label)
         
-        # Kiểm tra xem có phải dynamic threshold không
-        use_dynamic = label_config.threshold < 0
-        atr_multiplier = abs(label_config.threshold) if use_dynamic else self.config.label.default_atr_multiplier
-        threshold = label_config.threshold if not use_dynamic else 0.0
-        
-        # Tính ATR nếu cần
-        atr_values = None
-        if use_dynamic and all(col in data.columns for col in ['high', 'low', 'close']):
-            from backend.data.feature_engineering import calculate_atr
-            atr_values = calculate_atr(data, 14)
-        
-        labels = label_opt.create_labels(
+        labels = label_opt.create_triple_barrier_labels(
             data=data,
             price_col=price_col,
             horizon=label_config.horizon,
-            threshold=threshold,
-            use_dynamic_threshold=use_dynamic,
-            atr_values=atr_values,
-            atr_multiplier=atr_multiplier
+            sl_multiplier=label_config.sl_multiplier,
+            tp_multiplier=label_config.tp_multiplier,
+            atr_period=14,
+            min_ret=label_config.min_ret
         )
         
         # Chuẩn bị dữ liệu

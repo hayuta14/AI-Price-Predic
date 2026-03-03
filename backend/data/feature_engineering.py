@@ -414,7 +414,7 @@ def create_all_features(data: pd.DataFrame, timestamp_col: Optional[str] = None)
     
     # 1. Returns
     if 'close' in df.columns:
-        df['returns'] = df['close'].pct_change()
+        df['returns'] = df['close'].pct_change().shift(1)
         df['returns_abs'] = abs(df['returns'])
         features.extend(['returns', 'returns_abs'])
     
@@ -423,7 +423,7 @@ def create_all_features(data: pd.DataFrame, timestamp_col: Optional[str] = None)
         # RSI 7 và RSI 21 cho multi-timeframe analysis
         for period in [7, 14, 21]:
             col_name = f'rsi_{period}'
-            df[col_name] = calculate_rsi(df['close'], period)
+            df[col_name] = calculate_rsi(df['close'], period).shift(1)
             features.append(col_name)
         
         # Multi-timeframe RSI ratios
@@ -435,7 +435,7 @@ def create_all_features(data: pd.DataFrame, timestamp_col: Optional[str] = None)
         # Higher timeframe RSI (50, 100) cho trend context
         for period in [50, 100]:
             col_name = f'rsi_{period}'
-            df[col_name] = calculate_rsi(df['close'], period)
+            df[col_name] = calculate_rsi(df['close'], period).shift(1)
             features.append(col_name)
         
         # RSI higher timeframe ratios

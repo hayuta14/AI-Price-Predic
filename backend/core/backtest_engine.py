@@ -50,6 +50,12 @@ class Trade:
     funding_cost: float = 0.0
     exit_reason: str = ""
     is_open: bool = True
+    # 退出所在K线的OHLC信息 & 是否跳空离场
+    exit_bar_open: Optional[float] = None
+    exit_bar_high: Optional[float] = None
+    exit_bar_low: Optional[float] = None
+    exit_bar_close: Optional[float] = None
+    gap_exit: bool = False
 
 
 @dataclass
@@ -99,9 +105,8 @@ class BacktestEngine:
         self.equity_history: List[float] = [initial_equity]
         self.time_history: List[datetime] = []
         
-        # Backtest này tính returns theo từng bar trong equity_series
-        self.metrics_calculator = MetricsCalculator(periods_per_year=365 * 24 * 4)
-        self.daily_metrics_calculator = MetricsCalculator(periods_per_year=365)
+        # 指标计算器：基于15分钟K线的年化参数
+        self.metrics_calculator = MetricsCalculator.for_15min_bars()
         self.trade_counter = 0
         # Realistic execution simulator (fees, slippage, funding)
         self.execution_simulator = RealisticExecutionSimulator(
@@ -293,7 +298,10 @@ class BacktestEngine:
     def update_trades(
         self,
         timestamp: datetime,
-        price: float,
+        open_price: float,
+        high_price: float,
+        low_price: float,
+        close_price: float,
         atr: Optional[float] = None
     ) -> List[Trade]:
         """
@@ -301,42 +309,74 @@ class BacktestEngine:
         
         Args:
             timestamp: 当前时间戳
-            price: 当前价格
+            open_price: 当前K线开盘价
+            high_price: 当前K线最高价
+            low_price: 当前K线最低价
+            close_price: 当前K线收盘价
             atr: ATR值（可选，用于动态止损）
             
         Returns:
             已平仓的交易列表
         """
-        closed_trades = []
-        
+        closed_trades: List[Trade] = []
+
+        # 使用整根K线的OHLC进行更真实的撮合模拟
         for trade in self.open_trades[:]:  # 使用切片复制，避免迭代时修改
-            # 检查止损/止盈
-            exit_price = None
-            exit_reason = ""
-            
+            exit_price: Optional[float] = None
+            exit_reason: str = ""
+            gap_exit: bool = False
+
             if trade.direction == TradeDirection.LONG:
-                # 做多：价格下跌触发止损，价格上涨触发止盈
-                if price <= trade.stop_loss:
-                    exit_price = trade.stop_loss
+                # 1) 跳空低开直接击穿止损 -> 按开盘价离场（保守处理为跳空止损）
+                if open_price < trade.stop_loss:
+                    exit_price = open_price
                     exit_reason = "止损"
-                elif price >= trade.take_profit:
-                    exit_price = trade.take_profit
-                    exit_reason = "止盈"
+                    gap_exit = True
+                else:
+                    # 2) 盘中同时触及止损与止盈时，保守假设先触发止损
+                    stop_hit = low_price <= trade.stop_loss
+                    tp_hit = high_price >= trade.take_profit
+
+                    if stop_hit:
+                        # 止损价基础上再施加额外滑点（不利方向）
+                        sl_rate = float(self.trading_config.slippage_rate)
+                        exit_price = trade.stop_loss * (1.0 - sl_rate * 2.0)
+                        exit_reason = "止损"
+                    elif tp_hit:
+                        exit_price = trade.take_profit
+                        exit_reason = "止盈"
+
             else:  # SHORT
-                # 做空：价格上涨触发止损，价格下跌触发止盈
-                if price >= trade.stop_loss:
-                    exit_price = trade.stop_loss
+                # 1) 跳空高开直接击穿止损 -> 按开盘价离场（保守处理为跳空止损）
+                if open_price > trade.stop_loss:
+                    exit_price = open_price
                     exit_reason = "止损"
-                elif price <= trade.take_profit:
-                    exit_price = trade.take_profit
-                    exit_reason = "止盈"
-            
+                    gap_exit = True
+                else:
+                    # 2) 盘中同时触及止损与止盈时，保守假设先触发止损
+                    stop_hit = high_price >= trade.stop_loss
+                    tp_hit = low_price <= trade.take_profit
+
+                    if stop_hit:
+                        sl_rate = float(self.trading_config.slippage_rate)
+                        exit_price = trade.stop_loss * (1.0 + sl_rate * 2.0)
+                        exit_reason = "止损"
+                    elif tp_hit:
+                        exit_price = trade.take_profit
+                        exit_reason = "止盈"
+
             if exit_price is not None:
-                # 平仓
+                # 记录退出时所在K线的OHLC和是否跳空离场
+                trade.exit_bar_open = open_price
+                trade.exit_bar_high = high_price
+                trade.exit_bar_low = low_price
+                trade.exit_bar_close = close_price
+                trade.gap_exit = gap_exit
+
                 closed_trade = self._close_trade(trade, timestamp, exit_price, exit_reason)
                 closed_trades.append(closed_trade)
                 self.open_trades.remove(trade)
-        
+
         return closed_trades
     
     def _close_trade(
@@ -441,13 +481,23 @@ class BacktestEngine:
         for idx, row in data.iterrows():
             timestamp = row[timestamp_col]
             price = row[price_col]
+            open_price = row.get('open', price)
+            high_price = row.get('high', price)
+            low_price = row.get('low', price)
             prediction = predictions.iloc[idx] if idx < len(predictions) else 0.5
             
             # 获取ATR值
             atr = atr_values.iloc[idx] if atr_values is not None and idx < len(atr_values) else price * 0.01
             
-            # 更新现有交易
-            self.update_trades(timestamp, price, atr)
+            # 更新现有交易（使用整根K线的OHLC进行模拟）
+            self.update_trades(
+                timestamp=timestamp,
+                open_price=open_price,
+                high_price=high_price,
+                low_price=low_price,
+                close_price=price,
+                atr=atr,
+            )
             
             # 检查是否有开仓信号
             if signals is not None:
@@ -473,28 +523,36 @@ class BacktestEngine:
             self.equity_history.append(self.current_equity)
             self.time_history.append(timestamp)
         
-        # 强制平仓所有未平仓交易
-        final_price = data[price_col].iloc[-1]
-        final_timestamp = data[timestamp_col].iloc[-1]
+        # 强制平仓所有未平仓交易（使用最后一根K线信息）
+        final_row = data.iloc[-1]
+        final_price = final_row[price_col]
+        final_timestamp = final_row[timestamp_col]
+        final_open = final_row.get('open', final_price)
+        final_high = final_row.get('high', final_price)
+        final_low = final_row.get('low', final_price)
         
         for trade in self.open_trades[:]:
+            trade.exit_bar_open = final_open
+            trade.exit_bar_high = final_high
+            trade.exit_bar_low = final_low
+            trade.exit_bar_close = final_price
+            trade.gap_exit = False
+
             self._close_trade(trade, final_timestamp, final_price, "强制平仓")
             self.open_trades.remove(trade)
         
-        # 计算权益曲线和收益率
+        # 计算权益曲线和收益率（15分钟级别）
         equity_series = pd.Series(self.equity_history[1:], index=self.time_history)
         returns = equity_series.pct_change().fillna(0.0)
-        
-        # 计算日收益率（用于风险指标，避免与年化周期不一致）
-        daily_returns = self._calculate_daily_returns(equity_series)
-        daily_equity = (1 + daily_returns).cumprod() * self.initial_equity
 
-        # 使用daily metrics calculator，periods_per_year=365
-        metrics = self.daily_metrics_calculator.calculate_all_metrics(daily_returns, daily_equity)
+        # 直接在15分钟级别上计算所有指标（已通过periods_per_year正确年化）
+        metrics = self.metrics_calculator.calculate_all_metrics(returns, equity_series)
         
         # 转换为字典
         metrics_dict = {
             'sharpe_ratio': metrics.sharpe_ratio,
+            'sortino_ratio': metrics.sortino_ratio,
+            'omega_ratio': metrics.omega_ratio,
             'max_drawdown': metrics.max_drawdown,
             'profit_factor': metrics.profit_factor,
             'calmar_ratio': metrics.calmar_ratio,
@@ -505,6 +563,10 @@ class BacktestEngine:
             'total_trades': metrics.total_trades,
             'winning_trades': metrics.winning_trades,
             'losing_trades': metrics.losing_trades,
+            'max_consecutive_losses': metrics.max_consecutive_losses,
+            'max_consecutive_wins': metrics.max_consecutive_wins,
+            'avg_trade_duration': metrics.avg_trade_duration,
+            'expectancy': metrics.expectancy,
             'max_dd_duration': metrics.max_dd_duration,
             'recovery_factor': metrics.recovery_factor
         }
@@ -512,16 +574,13 @@ class BacktestEngine:
         # 生成交易日志DataFrame
         trade_log = self._generate_trade_log()
         
-        # 计算日收益率
-        daily_returns = self._calculate_daily_returns(equity_series)
-        
         return BacktestResults(
             equity_curve=equity_series,
             returns=returns,
             trades=self.trades,
             metrics=metrics_dict,
             trade_log=trade_log,
-            daily_returns=daily_returns
+            daily_returns=self._calculate_daily_returns(equity_series)
         )
 
 
@@ -635,7 +694,14 @@ class RealisticExecutionSimulator:
                 'fees': trade.fees,
                 'slippage': trade.slippage,
                 'funding_cost': trade.funding_cost,
-                'exit_reason': trade.exit_reason
+                'exit_reason': trade.exit_reason,
+                # 退出所在K线的OHLC信息
+                'bar_open': trade.exit_bar_open,
+                'bar_high': trade.exit_bar_high,
+                'bar_low': trade.exit_bar_low,
+                'bar_close': trade.exit_bar_close,
+                # 是否因跳空而在开盘价离场
+                'gap_exit': trade.gap_exit,
             })
         
         return pd.DataFrame(log_data)
